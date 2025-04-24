@@ -9,7 +9,30 @@ import sys
 import time
 import logging
 
-# Requires python-gobject
+# Add the parent directory to Python path
+try:
+    # Get the absolute path to the bin directory
+    bin_dir = os.path.dirname(os.path.abspath(__file__))
+    # Get the absolute path to the parent directory
+    parent_dir = os.path.dirname(bin_dir)
+    # Add parent directory to the start of Python path
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+    
+    # Now try to import our modules
+    from oreon_pickup import pickup_config, pickup_net, pickup_state
+    logging.info(f"CLI: Successfully imported Oreon Pickup modules from {parent_dir}")
+except ImportError as e:
+    logging.error(f"CLI: Failed to import Oreon Pickup modules: {str(e)}")
+    # Print sys.path for debugging
+    # logging.error(f"CLI: Current sys.path: {sys.path}")
+    # logging.error(f"CLI: Looking for modules in: {parent_dir}")
+    # Provide a more user-friendly error message
+    print(f"Error: Could not import necessary Oreon Pickup modules ({e}).", file=sys.stderr)
+    print("       Ensure the script is run from the correct directory and required dependencies are installed.", file=sys.stderr)
+    sys.exit(1)
+
+# Requires python-gobject (check after own modules are imported)
 try:
     import gi
     # Try importing Gtk 4 first, fallback to 3 if needed for broader compatibility initially
@@ -20,22 +43,26 @@ try:
              gi.require_version('Gtk', '3.0')
          except ValueError:
              print("Error: GTK 3.0 or 4.0 not found.", file=sys.stderr)
-             sys.exit(1)
+             # Continue without GTK for CLI, but log warning
+             logging.warning("GTK 3.0 or 4.0 not found, some features might be limited.")
     gi.require_version('Gio', '2.0')
     from gi.repository import Gio, GLib
+    HAS_GIO = True
 except ImportError:
-    print("Error: python-gobject is required for D-Bus communication.", file=sys.stderr)
-    print("Please install it (e.g., 'sudo dnf install python3-gobject').", file=sys.stderr)
-    sys.exit(1)
-
-# Import from our modules
-from oreon_pickup import pickup_config
-from oreon_pickup import pickup_net
-from oreon_pickup import pickup_state
+    print("Warning: python-gobject (Gio/GLib) not found. Application restore functionality will be disabled.", file=sys.stderr)
+    print("         Install it using: 'sudo dnf install python3-gobject'", file=sys.stderr)
+    HAS_GIO = False
 
 # Setup logging (can be configured further)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-log = logging.getLogger(__name__)
+# Moved logger setup after initial imports to avoid potential issues
+log = logging.getLogger('oreon-pickup-cli')
+log.setLevel(logging.INFO) # Set default level
+# Add handler if not already configured by basicConfig in panel
+if not logging.getLogger().handlers:
+     handler = logging.StreamHandler(sys.stderr)
+     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+     handler.setFormatter(formatter)
+     logging.getLogger().addHandler(handler)
 
 def get_running_app_ids():
     """
@@ -74,7 +101,7 @@ def get_running_app_ids():
 
     except subprocess.CalledProcessError as e:
         log.warning(f"'gdbus call org.gnome.Shell.Eval' failed (command: '{' '.join(e.cmd)}'). It might be disabled or the interface changed.")
-        log.warning(f"  Stderr: {e.stderr}")
+        # log.warning(f"  Stderr: {e.stderr}") # Can be noisy
     except FileNotFoundError:
         log.warning("'gdbus' command not found. Cannot query GNOME Shell.")
     except subprocess.TimeoutExpired:
@@ -113,6 +140,10 @@ def save_state():
 def restore_state():
     """Restores the state (primarily applications) from the saved JSON file."""
     log.info("Restoring state...")
+    if not HAS_GIO:
+         log.error("Cannot restore state: Gio/GLib (python-gobject) is not available.")
+         return
+
     state_data = pickup_state.load_state()
     if not state_data or not state_data.get("applications"): # Check if state exists and has apps
         log.info("No application state found to restore.")
@@ -125,7 +156,7 @@ def restore_state():
     activated_count = 0
     failed_apps = []
 
-    app_launch_context = Gio.AppLaunchContext()
+    app_launch_context = Gio.AppLaunchContext.new() # Use Gio.AppLaunchContext.new()
 
     for app_id in app_ids_to_restore:
         if not isinstance(app_id, str) or not app_id:
@@ -169,25 +200,32 @@ def restore_state():
 def cli_discover(args):
     """Handle the 'discover' CLI command."""
     log.info("Starting network discovery...")
-    if not pickup_net.start_discovery():
+    # Define a simple callback for the CLI
+    discovered_devices_cli = {}
+    def cli_update_callback(devices):
+        nonlocal discovered_devices_cli
+        discovered_devices_cli = devices
+        # Simple display update - could be fancier
+        sys.stdout.write("\r" + f"Found: {len(devices)} devices. {devices}")
+        sys.stdout.flush()
+
+    if not pickup_net.start_discovery(update_callback=cli_update_callback):
         log.error("Failed to start discovery. Is zeroconf installed?")
         return
 
     print(f"Discovering Oreon Pickup devices for {args.timeout} seconds... Press Ctrl+C to stop early.")
     try:
-        start_time = time.monotonic()
-        while time.monotonic() - start_time < args.timeout:
-            devices = pickup_net.get_discovered_devices()
-            # Simple display update - could be fancier
-            sys.stdout.write("\r" + f"Found: {len(devices)} devices. {devices}")
-            sys.stdout.flush()
-            time.sleep(2)
+        time.sleep(args.timeout)
         print("\nDiscovery finished.")
-        devices = pickup_net.get_discovered_devices()
-        if devices:
+        if discovered_devices_cli:
             print("Discovered Devices:")
-            for name, info in devices.items():
-                print(f"  - {info.get('properties',{}).get('hostname', name)} ({info.get('server', '?')}:{info.get('port','?')}) @ {info.get('addresses',[])}")
+            for name, info in discovered_devices_cli.items():
+                # Extract info more carefully
+                hostname = info.properties.get(b'hostname', b'Unknown').decode()
+                server = info.server if info.server else '?'
+                port = info.port if info.port else '?'
+                addresses = [socket.inet_ntoa(addr) for addr in info.addresses] if info.addresses else []
+                print(f"  - {hostname} ({server}:{port}) @ {addresses}")
         else:
             print("No devices found.")
 
@@ -195,6 +233,7 @@ def cli_discover(args):
         print("\nDiscovery interrupted by user.")
     finally:
         pickup_net.stop_discovery()
+        print("Discovery stopped.")
 
 def cli_pair_show_code(args):
     """Handle the 'pair show-code' CLI command."""
@@ -209,9 +248,11 @@ def cli_pair_show_code(args):
         # Access the server thread (might be fragile if structure changes)
         server_thread = pickup_net._pairing_server_thread
         if server_thread:
+            # Join the thread to wait for it to finish (or timeout)
             server_thread.join(timeout=pickup_config.PAIRING_TIMEOUT + 5) # Wait slightly longer than timeout
         else:
              log.error("Could not find pairing server thread.")
+             # If thread creation failed, just wait for timeout duration
              time.sleep(pickup_config.PAIRING_TIMEOUT)
     except KeyboardInterrupt:
         print("\nPairing interrupted by user.")
@@ -224,13 +265,13 @@ def cli_pair_enter_code(args):
     """Handle the 'pair enter-code' CLI command."""
     if not args.ip or not args.code:
         log.error("Both IP address and code are required.")
+        parser.print_help()
         return
     print(f"Attempting to pair with {args.ip} using code {args.code}...")
     success = pickup_net.initiate_pairing(args.ip, args.port, args.code)
     if success:
         print("Pairing successful!")
-        # TODO: Add device to state file
-        # Need info from response in pickup_net: pickup_state.add_paired_device(...)
+        # State is saved within initiate_pairing now
     else:
         print("Pairing failed.")
 
@@ -244,14 +285,23 @@ def cli_list_paired(args):
     for device_id, info in paired_devices.items():
         # Use hostname if available, otherwise device_id
         name = info.get('hostname', device_id)
-        print(f"  - {name}: {info}") # Adjust formatting as needed
+        ip = info.get('ip', 'N/A')
+        paired_at = info.get('paired_at')
+        time_str = f"on {time.strftime('%Y-%m-%d %H:%M', time.localtime(paired_at))}" if paired_at else ""
+        print(f"  - {name} ({ip}) [ID: {device_id}] {time_str}")
 
 def main():
     parser = argparse.ArgumentParser(
         description=f"Oreon Pickup CLI v{pickup_config.VERSION}: Save, restore, and sync session state.",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument('--version', action='version', version=f'%(prog)s {pickup_config.VERSION}')
+    # Use version from __init__ if available, otherwise config
+    try:
+         from oreon_pickup import __version__ as pkg_version
+    except ImportError:
+         pkg_version = pickup_config.VERSION
+    parser.add_argument('--version', action='version', version=f'%(prog)s {pkg_version}')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging')
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands', required=True)
 
@@ -290,6 +340,14 @@ def main():
     # --- Add future commands: send, listen, unpair --- #
 
     args = parser.parse_args()
+
+    # Set log level based on verbosity
+    if args.verbose:
+        log.setLevel(logging.DEBUG)
+        logging.getLogger('oreon_pickup').setLevel(logging.DEBUG) # Set for package modules too
+    else:
+        log.setLevel(logging.INFO)
+        logging.getLogger('oreon_pickup').setLevel(logging.INFO)
 
     if hasattr(args, 'func'):
         try:
