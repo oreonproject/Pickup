@@ -1,0 +1,12 @@
+[Panel]
+Name=Pickup
+Icon=document-send # Using a stock icon for now
+# Keywords=Oreon;Pickup;Sync;Restore;Session;
+# Uncomment Keywords later when functionality is present
+
+[Desktop Entry]
+Type=Application
+Exec=/usr/bin/oreon-pickup-panel # Path where the UI app will be installed
+Name=Pickup Settings
+Comment=Configure Oreon Pickup session synchronization
+Icon=document-send # Match the panel icon 
