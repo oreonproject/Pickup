@@ -26,7 +26,7 @@ try:
         sys.path.insert(0, parent_dir)
     
     # Import modules directly
-    from oreon_pickup.pickup_config import *
+    from oreon-pickup.pickup_config import *
     from oreon_pickup.pickup_net import *
     from oreon_pickup.pickup_state import *
     logger.info(f"Successfully imported Oreon Pickup modules from {parent_dir}")
